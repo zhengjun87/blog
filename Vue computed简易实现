@@ -1,112 +1,208 @@
-Vue是一个极具精简高效的前端mvvm框架，官方是这样介绍的：
-
-“Vue是一套用于构建用户界面的渐进式框架。与其它大型框架不同的是，Vue 被设计为可以自底向上逐层应用。Vue 的核心库只关注视图层，不仅易于上手，还便于与第三方库或既有项目整合。另一方面，当与现代化的工具链以及各种支持类库结合使用时，Vue 也完全能够为复杂的单页应用提供驱动。”
-
-此篇文章的内容是我在学习阅读源码时所得到的收获，参考了源码和各偏文章所撰写，如有不正确的地方欢迎交流。
-
-既然要实现computed那么我们必须解一下computed这个属性的特点
-
-1、与data产生关联，在data属性发生变化时更新值
-2、具有缓存性，只有在依赖的data发生变化时，才会从新执行表达式计算新值
-
-
-computed实现中用到发布/订阅（观察者）模式，computed属性订阅data属性，data改变后发布更新动作。
-
-以下是代码的实现和解读（完整代码在本文最下方）
-
-
-定义一个observer来对data初始对象进行数据劫持
-
-
-
-
-
-
-Observer参数是data对象
-
-通过遍历对象属性，分别进行getter和setter的设置，
-
-Dep是订阅收集器，Dep.target是正在处于收集依赖的watcher（computed每个属性都会初始化为一个watcher类实例），如果Dep.target有值则触发depend函数将此值存放到此data属性的dep的subs中，subs表示订阅此data的watcher集合，
-
-在属性被赋新值以后，执行notify函数逐个执行订阅器中的watcher集合的update函数进行状态更新。
-
-
-
-Dep类的实现如下
-
-
-
-
-
-
-在此处总结一下data初始化过程的实现；
-
-1、为每个data属性进行数据劫持，添加getter、setter；
-
-2、计算属性在执行表达式的时候会触发data的getter，这个时候data属性会将此计算属性的watcher订阅到自己的dep（订阅器）中；
-
-3、修改data属性会触发data的setter，这时会逐个执行dep中的各项依赖进行状态（是否为脏值）更新；
-
-
-
-初始化computed的代码
-
-
-
-
-initComputed参数是实例的options，
-
-为每一个计算属性在vm添加一个Watcher实例，便于直接通过this访问，也同时添加getter，计算属性不需要setter，
-
-在computed中的getter中，dirty表示是否为脏值，默认为false。
-
-Watcher的实现
-
-
-
-
-
-
-在此处总结一下computed初始化过程的实现；
-
-1、对每一个计算属性进行watcher实例化，并且添加到实例对象根属性_computedWatchers上；
-
-2、对每一个计算属性在实例对象根级进行数据劫持设置getter；
-
-3、在第一次获取computed属性值时触发getter，会判断是否为脏值，如果是则指执行watcher中的get函数，执行get函数过程中会触发data的getter，并赋值Dep.taget表示处于收集依赖中，此时data属性的getter中会收集到该计算属性的“订阅”，通过dep.depend()放到自己的订阅者集合中；
-
-4、在data发生改变，data属性中setter通过dep.notify() 会逐个执行该订阅者的update函数，向订阅自己的watcher集合表示“我的值已修改，你现在是脏值，下次执行的时候请从新执行get函数求值”；
-
-
-
-最后进行测试
-
-
-
-
-结果为：
-
-
-
-
-
-基本符合计算属性的特点。
-
-
-
-写在最后
-在上述实现中只达到了基础的实现，所以很多错误处理和特殊情况未做处理，但这不影响我们理解Vue框架的一些实现原理；
-
-本文虽然只是对计算属性做了一个简易的实现，但是其原理在Vue的各个API中随处可见，比如watch其实就是计算属性的无缓存版本，整个Vue的也是围绕着数据依赖收集和对html的指令解析来进行视图驱动，有兴趣的同学可以继续深入了解一下。
-
-完整代码如下
-
-
-
-参考：
-https://cn.vuejs.org（vue源码）
-
-https://juejin.im/post/5abdd6f6f265da23793c4458
-
-
+class BZ {
+  constructor(options) {
+    this.$options = options
+    if (options.data) {
+      initData(this)
+    }
+    if (options.computed) {
+      initComputed(this)
+    }
+  }
+}
+const sharedPropertyDefinition = {
+  enumerable: true,
+  configurable: true,
+  get: function() {},
+  set: function() {}
+}
+
+let watcherId = 0
+class Watcher {
+  constructor(vm, expression) {
+    this.vm = vm
+    this.deps = []
+    this.depIds = new Set()
+    this.getter = expression
+    this.id = ++watcherId
+    this.dirty = true // 是否为脏值（依赖项是否改变）
+    this.lazy = true // 是否惰性计算
+    this.value = this.lazy ? undefined : this.get()
+  }
+  get() {
+    pushTarget(this) // 将正在执行计算的watcher放入到Dep.target中
+    const vm = this.vm
+    let value = this.getter.call(vm, vm)
+    popTarget() // 从Dep.target中移除
+    return value
+  }
+  addDep(dep) { // 将此watcher添加到data的dep依赖中
+    if (!this.depIds.has(dep.id)) {
+      this.deps.push(dep)
+      this.depIds.add(dep.id)
+      dep.addSub(this)
+    }
+  }
+  update() { // data数据发生变化时，修改脏值判断
+    this.dirty = true
+  }
+  evaluate() { // 如果脏值判断为true，则从新计算，并修改脏值状态
+    this.value = this.get()
+    this.dirty = false
+  }
+}
+
+let depId = 0
+class Dep {
+  constructor() {
+    this.subs = []
+    this.id = depId++
+  }
+  addSub(watcher) {
+    this.subs.push(watcher)
+  }
+  depend() {
+    if (Dep.target) {
+      Dep.target.addDep(this)
+    }
+  }
+  notify() {
+    const subs = this.subs.slice()
+    for (let i = 0, l = subs.length; i < l; i++) {
+      subs[i].update()
+    }
+  }
+}
+Dep.target = null
+
+
+const targetStack = []
+
+function pushTarget(_target) {
+  if (Dep.target) targetStack.push(Dep.target)
+  Dep.target = _target
+}
+
+function popTarget() {
+  Dep.target = targetStack.pop()
+}
+
+function proxy(target, sourceKey, key) {
+  sharedPropertyDefinition.get = function proxyGetter() {
+    return this[sourceKey][key]
+  }
+  sharedPropertyDefinition.set = function proxySetter(val) {
+    this[sourceKey][key] = val
+  }
+  Object.defineProperty(target, key, sharedPropertyDefinition)
+}
+function initData(vm) {
+  let data = getData(vm.$options.data)
+  vm._data = data
+  // 将data代理到vm属性下，便于直接访问
+  Object.keys(data).forEach(key => {
+    proxy(vm, '_data', key)
+  })
+  observe(data, vm)
+}
+
+function initComputed(vm) {
+  let computeds = vm.$options.computed
+  const watchers = (vm._computedWatchers = Object.create(null))
+  let keys = Object.keys(computeds)
+  keys.forEach(key => {
+    const expression = computeds[key]
+    let getter = typeof expression === 'function' ? expression : expression.get
+    watchers[key] = new Watcher(vm, getter) // 添加到vm下的watchers
+    if (!(key in vm._data)) {
+      difineComputed(vm, key, expression)
+    }
+  })
+}
+
+function difineComputed(vm, key, expression) {
+  Object.defineProperty(vm, key, {
+    get() {
+      const watcher = this._computedWatchers && this._computedWatchers[key]
+      if (watcher) {
+        if (watcher.dirty) {
+          watcher.evaluate()
+        }
+        return watcher.value
+      }
+    },
+    set() {}
+  })
+}
+
+function getData(dataFunc, vm) {
+  try {
+    return dataFunc.call(vm, vm)
+  } catch (e) {
+    console.log(e)
+    return {}
+  }
+}
+
+class Observer {
+  constructor(data) {
+    let keys = Object.keys(data)
+    keys.forEach(item => {
+      defineReactive(data, item, data[item])
+    })
+  }
+}
+// 设置getter, setter
+function defineReactive(data, key, value) {
+  observe(value) // 深度劫持
+  const dep = new Dep()
+  Object.defineProperty(data, key, {
+    enumerable: true,
+    configurable: true,
+    get() {
+      if (Dep.target) {
+        dep.depend()
+      }
+      return value
+    },
+    set(newVal) {
+      if (newVal === value) {
+        return
+      }
+      value = newVal
+      observe(newVal) // 如果是对象则劫持新赋值的值
+      dep.notify()
+    }
+  })
+}
+
+function observe(data) {
+  if (typeof data === 'object' && !(data instanceof Array)) {
+    return new Observer(data)
+  }
+}
+
+let bm = new BZ({
+  data() {
+    return {
+      a: 1,
+      b: 2
+    }
+  },
+  computed: {
+    c() {
+      console.log('C收集依赖')
+      return this.a + this.b
+    },
+    d() {
+      console.log('D收集依赖')
+      return this.b + "D"
+    }
+  }
+})
+
+console.log(bm.c, bm.d)
+console.log(bm.c, bm.d)
+console.log(bm.c, bm.d) // 多次打印，但是只执行了一次表达式，符合结果缓存特点
+bm.a = 6 // 修改其依赖项
+console.log(bm.c, bm.d) // C的依赖项发生了改变，则C从新执行了表达式
 
